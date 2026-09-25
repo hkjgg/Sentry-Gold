@@ -22,11 +22,38 @@ Structure tools tell you **where**. Signal tools tell you **when**. SENTRY tells
 - **All arrays are non-series**: index `0` is the oldest bar and `rates_total-1` is the forming bar. This holds for the `OnCalculate` inputs, every indicator buffer and every internal array (H1 cache, news cache).
 - Only closed bars (`index <= rates_total-2`) are computed. Each closed bar is computed **once**, in order, and never rewritten. The forming bar holds `EMPTY_VALUE` in every buffer.
 - A full recompute happens only when the terminal reloads history (`prev_calculated == 0`) or the first bar of the chart changes.
-- Warm-up bars (not enough history for any metric, including the H1 bias) hold `EMPTY_VALUE` in every public buffer. With the defaults the first valid bar is index 513, because ATR percentile needs 500 ATR(14) values.
+- **Range:** only the last `InpMaxBars` closed bars (default 5000) get public values. Every older bar holds `EMPTY_VALUE`.
+- **Internal warm-up:** ATR and EMA are also computed on the 499 bars just before that range (with defaults), so ATR percentile and the settled EMA slope are valid on the first public bar. New bars after the first calculation are always computed.
+- **Other warm-up:** a bar with any metric missing (short history, or H1 history not yet available) holds `EMPTY_VALUE` in every public buffer.
 - Higher timeframe: a chart bar closing at time T uses only the last H1 bar whose close time is at or before T. A chart bar is not computed until the terminal has a newer H1 bar, so the H1 bar it reads is final.
 - Spread for a bar is that bar's own `MqlRates.spread` value (the `spread[]` array of `OnCalculate`), never the live symbol spread.
 
 ---
+
+## Calculation pipeline and performance
+
+A calculation (the full first run, or each new bar) does this:
+
+1. **Data, fetched once.**
+   - One `CopyRates` call for H1. The first run loads from 21 days before the first internally computed bar; later runs fetch only new H1 bars.
+   - At most one calendar load (`CalendarValueHistory`) for the calculated range, refreshed at most hourly.
+2. **Five phases over the bar range.** They run in order, and none of them requests data or waits:
+   - metrics: ATR, EMA, ER, CHOP, slope, BarRangeX
+   - ATR percentile: one pass over the contiguous ATR history
+   - H1 mapping: a moving pointer into the H1 cache
+   - news flags: moving pointers into the sorted event times
+   - regime, anti-flicker and score
+3. **Timing.** After the full calculation, one line prints the breakdown (metrics, ATRpct, H1, news, regime/score, total). The budget is 200 ms for the full calculation and 5 ms per new bar.
+
+**H1 history missing** (for example error 4401): SENTRY never waits inside `OnCalculate`.
+- `OnCalculate` returns 0, which requests the data, and logs this once.
+- A 2 s timer refreshes the chart for up to 60 s. After that, ticks trigger the next calls.
+- The calculation continues normally when the data arrives.
+
+**Design note for Stage 2 (Proof engine, about 50,000 M15 bars):**
+- The metric functions in `Metrics.mqh` are pure: arrays, an index and inputs, with no globals. They run the same way on standalone arrays of any size.
+- Each phase works on an index range `[from..to]` and keeps its state in arrays: ATR/EMA buffers, the raw and published regime, and the H1 and news pointers. A large history can therefore be processed in chunks from `OnTimer` by calling the phases over consecutive ranges.
+- ATR percentile costs O(lookback) per bar. At 50,000 bars that is about 25 M comparisons. An incremental sorted window is listed in Ideas in case that is too slow.
 
 ## Buffers (readable via `iCustom`)
 
@@ -62,7 +89,7 @@ if(CopyBuffer(h, 2, 1, 1, state) == 1 && state[0] != EMPTY_VALUE)
 ### Metrics — `Include/Sentry/Metrics.mqh`
 - **True range** (`Metrics_TrueRange`): max(High, previous Close) minus min(Low, previous Close).
 - **ATR** (`Metrics_ATR`): the simple average of the last 14 true ranges (same as MT5 `iATR`).
-- **EMA** (`Metrics_EMA`): exponential average of Close with alpha = 2/(50+1), seeded with the simple average of the first 50 closes.
+- **EMA** (`Metrics_EMA`): exponential average of Close with alpha = 2/(50+1), seeded with the simple average of the first 50 closes of the calculated range.
 - **ER** (`Metrics_ER`): |Close[i] − Close[i−20]| divided by the sum of the 20 absolute close-to-close changes, and 0 when that sum is 0.
 - **CHOP** (`Metrics_CHOP`): 100 × log10(sum of the last 14 true ranges ÷ (highest High − lowest Low of those 14 bars)) ÷ log10(14).
 - **ATRpct** (`Metrics_ATRPercentile`): the percentage of the previous 499 ATR(14) values that are strictly below the current ATR(14). The window is 500 bars, including the current one.
@@ -116,6 +143,7 @@ Every factor is binary: it is either met or not met.
 
 | Group | Input | Default | Meaning |
 |---|---|---|---|
+| Calculation | `InpMaxBars` | 5000 | closed bars computed in the first calculation; older bars stay `EMPTY_VALUE` |
 | Metrics | `InpERPeriod` | 20 | Efficiency Ratio period (chart and H1) |
 | | `InpChopPeriod` | 14 | Choppiness Index period |
 | | `InpATRPeriod` | 14 | ATR period (chart and H1) |
@@ -156,6 +184,7 @@ Every factor is binary: it is either met or not met.
 Invalid inputs (for example periods < 1, inverted ranges, or hours outside 0-23) make `OnInit` return `INIT_PARAMETERS_INCORRECT` and print the reason.
 
 Engine constants that are not trading thresholds are in `Config.mqh`:
+- Retry timer: every 2 s. H1 history refresh stops after 60 s; ticks take over.
 - EMA settle bars: 100.
 - H1 warm-up: 21 days of H1 before the first chart bar.
 - Calendar refresh interval: 1 hour.
@@ -170,4 +199,4 @@ Engine constants that are not trading thresholds are in `Config.mqh`:
 - **AUTO assumes a New York-close broker** (GMT+2 in winter, GMT+3 during US DST). Brokers on another convention should use MANUAL. The live offset check logs once when the assumption looks wrong.
 - **MANUAL uses a fixed offset.** With a broker that changes offset for DST, session windows are one hour off for part of the year.
 - **Missing news is permanent for those bars.** If the calendar is still unavailable after the 30 s startup wait, those history bars are scored without news and a warning is printed. They are not rescored later, so a fresh instance may give a different result for those bars.
-- **Recursive EMA depends on the history start.** The EMA settles over 100+ bars, so values are identical for identical history but can differ by rounding noise when the history start differs.
+- **Recursive EMA depends on where the calculation starts.** The EMA is seeded 499 bars before the first public bar, so the seed's weight on the first public bar is about 1e-9. Two instances that start at different bars (for example a fresh instance loaded later) can therefore differ in Slope by about 1e-9. ER, CHOP, ATR and ATRpct are finite-window values and match exactly. The Stage 3 harness should compare Slope-derived values with a tolerance, or compare instances that share the same start.

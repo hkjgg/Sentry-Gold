@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Stage 1 — Performance fix (runtime report: "indicator is too slow, 3141 ms", H1 error 4401)
+- New input `InpMaxBars` (default 5000). Only the last MaxBars closed bars are computed, with an internal ATR/EMA warm-up of 499 bars. Older bars stay `EMPTY_VALUE`.
+- Pipeline:
+  - Data is fetched once per calculation: one H1 `CopyRates` and at most one calendar load, limited to the calculated range.
+  - Five phases then run over the bar range: metrics, ATRpct, H1, news, regime/score.
+  - No data requests inside per-bar loops.
+- H1: the cache fills once per calculation; H1 ER and slope are computed once per H1 bar; chart bars map to H1 bars with a moving pointer (binary search only if time goes backwards).
+- News: event times for the calculated range are loaded once into a sorted array; per-bar lookups use moving pointers.
+- ATR percentile: one pass per bar over the contiguous ATR history, with no sorting.
+- H1 history not ready (4401):
+  - `OnCalculate` returns 0 (which requests the data) and logs once.
+  - A 2 s timer refreshes the chart for up to 60 s.
+  - There is no waiting or looping in `OnCalculate`.
+- One-time timing breakdown after the full calculation: metrics, ATRpct, H1, news, regime/score, total.
+- `Tests/SENTRY_BufferCheck.mq5` is now a test EA that polls with `OnTimer`. No `Sleep()` remains anywhere.
+- Sessions: UTC is computed once per bar.
+- `#property version "1.00"`.
+
 ### Stage 1 — Review changes
 - Regime clarity: RANGE earns the 35 points only when ER ≤ 0.25 (new input `InpRangeClarityERMax`). A RANGE with a higher ER is a transition and scores 0. The TREND rule is unchanged.
 - StrategyHint is 0 (none) whenever State is STAND_ASIDE. The Regime buffer is unchanged.
@@ -32,5 +50,6 @@
 ## Ideas
 - Detect the broker's offset convention from history (for example the weekly open hour) for brokers that are not New York-close.
 - Retry a failed calendar load sooner than one hour, and optionally rescore bars that were computed while the calendar was unavailable. Rescoring needs an explicit non-repaint policy.
-- ATR percentile over a sorted sliding window (O(log n) per bar) if the performance budget ever gets tight.
+- ATR percentile over an incremental sorted window (O(log n) lookup) if the Stage 2 run on 50,000 bars needs it.
+- Chunked Proof runs from `OnTimer` over consecutive ranges, reusing the phase functions.
 - Notice once on non-gold symbols (planned for Stage 8).

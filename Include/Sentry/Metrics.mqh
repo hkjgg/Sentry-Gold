@@ -5,13 +5,17 @@
 //| Indexing: every array in this file is NON-series (index 0 is the |
 //| oldest bar). Each function reads only indices <= i.              |
 //| A function returns EMPTY_VALUE when there is not enough history. |
+//|                                                                  |
+//| The metric functions are pure (arrays + index + inputs, no       |
+//| globals), so the same code runs on the indicator buffers and on  |
+//| large standalone arrays (Stage 2 Proof engine, chunked runs).    |
 //+------------------------------------------------------------------+
 #ifndef SENTRY_METRICS_MQH
 #define SENTRY_METRICS_MQH
 
 #include "Config.mqh"
 
-//--- Per-bar metric snapshot
+//--- Per-bar metric snapshot (input of Regime_Classify)
 struct SentryMetrics
   {
    double            er;
@@ -51,17 +55,19 @@ double Metrics_ATR(const double &high[], const double &low[], const double &clos
   }
 
 //+------------------------------------------------------------------+
-//| EMA seeded with the SMA of the first `period` closes.            |
+//| EMA seeded at index start + period - 1 with the SMA of           |
+//| price[start .. start + period - 1]; recursive afterwards.        |
 //| ema[] holds the values already computed for bars < i.            |
 //+------------------------------------------------------------------+
-double Metrics_EMA(const double &price[], const double &ema[], const int i, const int period)
+double Metrics_EMA(const double &price[], const double &ema[], const int i, const int period, const int start)
   {
-   if(period < 1 || i < period - 1)
+   const int seedIndex = start + period - 1;
+   if(period < 1 || start < 0 || i < seedIndex)
       return EMPTY_VALUE;
-   if(i == period - 1)
+   if(i == seedIndex)
      {
       double sum = 0.0;
-      for(int k = 0; k < period; k++)
+      for(int k = start; k <= seedIndex; k++)
          sum += price[k];
       return sum / period;
      }
@@ -112,6 +118,7 @@ double Metrics_CHOP(const double &high[], const double &low[], const double &clo
 //+------------------------------------------------------------------+
 //| ATR percentile: share (0-100) of the previous lookback-1 ATR     |
 //| values that are strictly below the current ATR.                  |
+//| One pass over the contiguous ATR history (no sorting).           |
 //+------------------------------------------------------------------+
 double Metrics_ATRPercentile(const double &atr[], const int i, const int lookback)
   {
@@ -120,11 +127,12 @@ double Metrics_ATRPercentile(const double &atr[], const int i, const int lookbac
    const double current = atr[i];
    if(Metrics_IsEmpty(current))
       return EMPTY_VALUE;
+   const int first = i - lookback + 1;
+   if(Metrics_IsEmpty(atr[first]))   // ATR is contiguous: the oldest value decides
+      return EMPTY_VALUE;
    int below = 0;
-   for(int k = i - lookback + 1; k < i; k++)
+   for(int k = first; k < i; k++)
      {
-      if(Metrics_IsEmpty(atr[k]))
-         return EMPTY_VALUE;
       if(atr[k] < current)
          below++;
      }
@@ -133,11 +141,13 @@ double Metrics_ATRPercentile(const double &atr[], const int i, const int lookbac
 
 //+------------------------------------------------------------------+
 //| Slope: (EMA[i] - EMA[i-lag]) / ATR[i].                           |
-//| Valid only once the EMA has settled past its seed.               |
+//| Valid only once the EMA has settled SENTRY_EMA_SETTLE_BARS past  |
+//| its seed (emaStart + emaPeriod - 1).                             |
 //+------------------------------------------------------------------+
-double Metrics_Slope(const double &ema[], const double &atr[], const int i, const int lag, const int emaPeriod)
+double Metrics_Slope(const double &ema[], const double &atr[], const int i, const int lag,
+                     const int emaPeriod, const int emaStart)
   {
-   if(lag < 1 || i - lag < emaPeriod - 1 + SENTRY_EMA_SETTLE_BARS)
+   if(lag < 1 || i - lag < emaStart + emaPeriod - 1 + SENTRY_EMA_SETTLE_BARS)
       return EMPTY_VALUE;
    if(Metrics_IsEmpty(ema[i]) || Metrics_IsEmpty(ema[i - lag]) || Metrics_IsEmpty(atr[i]) || atr[i] <= 0.0)
       return EMPTY_VALUE;
@@ -155,8 +165,10 @@ double Metrics_BarRangeX(const double &high[], const double &low[], const double
   }
 
 //+------------------------------------------------------------------+
-//| H1 cache (non-series). Only CLOSED H1 bars are stored: the last  |
-//| bar returned by CopyRates may still be forming and is skipped.   |
+//| H1 cache (non-series). Filled by ONE CopyRates call per          |
+//| calculation (H1_Update); H1 ER and slope are computed once per   |
+//| H1 bar when it is appended. Only CLOSED H1 bars are stored: the  |
+//| newest bar returned by CopyRates may still be forming.           |
 //+------------------------------------------------------------------+
 datetime g_h1Time[];
 double   g_h1High[];
@@ -168,6 +180,7 @@ double   g_h1ER[];
 double   g_h1Slope[];
 int      g_h1Count      = 0;
 datetime g_h1LatestOpen = 0;   // open time of the newest H1 bar seen (closed or forming)
+int      g_h1Ptr        = -1;  // moving pointer: last H1 bar mapped to a chart bar
 
 void H1_Reset()
   {
@@ -181,6 +194,7 @@ void H1_Reset()
    ArrayFree(g_h1Slope);
    g_h1Count      = 0;
    g_h1LatestOpen = 0;
+   g_h1Ptr        = -1;
   }
 
 void H1_Resize(const int size)
@@ -199,21 +213,22 @@ void H1_Resize(const int size)
 void H1_ComputeMetrics(const int j)
   {
    g_h1ATR[j]   = Metrics_ATR(g_h1High, g_h1Low, g_h1Close, j, InpATRPeriod);
-   g_h1EMA[j]   = Metrics_EMA(g_h1Close, g_h1EMA, j, InpEMAPeriod);
+   g_h1EMA[j]   = Metrics_EMA(g_h1Close, g_h1EMA, j, InpEMAPeriod, 0);
    g_h1ER[j]    = Metrics_ER(g_h1Close, j, InpERPeriod);
-   g_h1Slope[j] = Metrics_Slope(g_h1EMA, g_h1ATR, j, InpSlopeLag, InpEMAPeriod);
+   g_h1Slope[j] = Metrics_Slope(g_h1EMA, g_h1ATR, j, InpSlopeLag, InpEMAPeriod, 0);
   }
 
 //+------------------------------------------------------------------+
-//| Appends newly closed H1 bars to the cache.                       |
-//| First call loads from chartFirstOpen minus the H1 warm-up.       |
-//| Returns false if H1 history is not available yet.                |
+//| One CopyRates call: the first call loads from `chartFrom` minus  |
+//| the H1 warm-up, later calls only fetch bars after the cache.     |
+//| Returns false while H1 history is not available (e.g. 4401); the |
+//| terminal starts loading it and the caller simply returns.        |
 //+------------------------------------------------------------------+
-bool H1_Update(const datetime chartFirstOpen)
+bool H1_Update(const datetime chartFrom)
   {
    const datetime from = (g_h1Count > 0)
                          ? (datetime)((long)g_h1Time[g_h1Count - 1] + 1)
-                         : (datetime)((long)chartFirstOpen - SENTRY_H1_WARMUP_SECONDS);
+                         : (datetime)((long)chartFrom - SENTRY_H1_WARMUP_SECONDS);
    const datetime to = (datetime)((long)TimeCurrent() + SENTRY_H1_COPY_MARGIN_SECONDS);
 
    MqlRates rates[];
@@ -256,11 +271,10 @@ bool H1_IsReadyFor(const datetime chartCloseTime)
   }
 
 //+------------------------------------------------------------------+
-//| Index of the last cached H1 bar whose close time <= t, or -1.    |
+//| Binary search fallback: last cached H1 bar with open <= limit.   |
 //+------------------------------------------------------------------+
-int H1_LastClosedIndex(const datetime t)
+int H1_SearchLastOpenAtOrBefore(const long limit)
   {
-   const long limit = (long)t - SENTRY_H1_SECONDS;   // open time + 1h <= t
    int lo = 0;
    int hi = g_h1Count - 1;
    int found = -1;
@@ -279,6 +293,20 @@ int H1_LastClosedIndex(const datetime t)
   }
 
 //+------------------------------------------------------------------+
+//| Index of the last cached H1 bar whose close time <= t, or -1.    |
+//| Moving pointer: amortised O(1) when chart bars arrive in order.  |
+//+------------------------------------------------------------------+
+int H1_LastClosedIndex(const datetime t)
+  {
+   const long limit = (long)t - SENTRY_H1_SECONDS;   // open time + 1h <= t
+   if(g_h1Ptr >= g_h1Count || (g_h1Ptr >= 0 && (long)g_h1Time[g_h1Ptr] > limit))
+      g_h1Ptr = H1_SearchLastOpenAtOrBefore(limit);   // time went backwards
+   while(g_h1Ptr + 1 < g_h1Count && (long)g_h1Time[g_h1Ptr + 1] <= limit)
+      g_h1Ptr++;
+   return g_h1Ptr;
+  }
+
+//+------------------------------------------------------------------+
 //| H1 bias for a chart bar closing at chartCloseTime (no lookahead: |
 //| only the last H1 bar whose close time <= chartCloseTime).        |
 //+------------------------------------------------------------------+
@@ -292,38 +320,6 @@ bool Metrics_H1Bias(const datetime chartCloseTime, double &h1ER, double &h1Slope
    h1ER    = g_h1ER[j];
    h1Slope = g_h1Slope[j];
    return (!Metrics_IsEmpty(h1ER) && !Metrics_IsEmpty(h1Slope));
-  }
-
-//+------------------------------------------------------------------+
-//| Collects all metrics for closed chart bar i. atr[] and ema[]     |
-//| must already hold bar i. Returns false during warm-up.           |
-//+------------------------------------------------------------------+
-bool Metrics_Collect(const int i,
-                     const datetime closeTime,
-                     const double &high[],
-                     const double &low[],
-                     const double &close[],
-                     const double &atr[],
-                     const double &ema[],
-                     SentryMetrics &m)
-  {
-   m.er        = Metrics_ER(close, i, InpERPeriod);
-   m.chop      = Metrics_CHOP(high, low, close, i, InpChopPeriod);
-   m.atrPct    = Metrics_ATRPercentile(atr, i, InpATRPctLookback);
-   m.slope     = Metrics_Slope(ema, atr, i, InpSlopeLag, InpEMAPeriod);
-   m.barRangeX = Metrics_BarRangeX(high, low, atr, i);
-   double h1ER    = EMPTY_VALUE;
-   double h1Slope = EMPTY_VALUE;
-   const bool h1Ok = Metrics_H1Bias(closeTime, h1ER, h1Slope);
-   m.h1ER    = h1ER;
-   m.h1Slope = h1Slope;
-
-   return (h1Ok &&
-           !Metrics_IsEmpty(m.er) &&
-           !Metrics_IsEmpty(m.chop) &&
-           !Metrics_IsEmpty(m.atrPct) &&
-           !Metrics_IsEmpty(m.slope) &&
-           !Metrics_IsEmpty(m.barRangeX));
   }
 
 #endif // SENTRY_METRICS_MQH

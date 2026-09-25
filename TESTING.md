@@ -2,15 +2,15 @@
 
 ## Stage 1 — Buffer check (`Tests/SENTRY_BufferCheck.mq5`)
 
-This script loads SENTRY through `iCustom` and prints buffers 0-7 for the last 20 closed bars, oldest first.
+This test EA loads SENTRY through `iCustom`, waits for it with `OnTimer` (no `Sleep`), prints buffers 0-7 for the last 20 closed bars (oldest first), then removes itself.
 
 **Setup**
 1. Compile `SENTRY.mq5` (repo at `MQL5\Indicators\SENTRY\`).
-2. Copy `Tests\SENTRY_BufferCheck.mq5` to `MQL5\Scripts\` and compile it.
+2. Copy `Tests\SENTRY_BufferCheck.mq5` to `MQL5\Experts\` and compile it.
 3. Open an XAUUSD chart and let M15 and H1 history load.
 
 **Run**
-Drag the script onto any chart. The inputs are:
+Drag the EA onto any chart. AutoTrading does not need to be enabled, because the EA does not trade. The inputs are:
 
 | Input | Default | Notes |
 |---|---|---|
@@ -31,7 +31,7 @@ Time              Regime       Score State        Hint            Veto          
 Veto letters: N = news, S = spread, K = spike, C = chop. The number is the raw bitmask.
 
 **Sanity checks**
-- No row is `EMPTY` on a chart with 600 or more bars of history. Rows are only `EMPTY` during warm-up, or if the newest H1 bar is not final yet.
+- No row is `EMPTY` on a chart with 600 or more bars of history. Rows are only `EMPTY` during warm-up, if the newest H1 bar is not final yet, or if the bar is older than the last `InpMaxBars` closed bars.
 - Score is between 0 and 100. When Veto ≠ 0, Score ≤ 25.
 - State matches Score: ≥ 70 GO, 40-69 CAUTION, < 40 STAND_ASIDE.
 - Hint is `none` on every STAND_ASIDE row. Otherwise TREND → continuation, RANGE → mean_reversion, CHOP/SPIKE → none.
@@ -48,18 +48,22 @@ Veto letters: N = news, S = spread, K = spike, C = chop. The number is the raw b
 
 ## Stage 1 — Performance
 
-When the full history finishes, the indicator prints one line to the Experts log:
+After the full calculation, the indicator prints one line to the Experts log:
 
 ```
-SENTRY: full history XAUUSD PERIOD_M15: 5000 bars in 12.34 ms (12.34 ms per 5000 bars; budget 200 ms). Calendar load 8.10 ms.
+SENTRY: full calculation XAUUSD PERIOD_M15: 5000 bars (+499 warm-up). metrics x ms | ATRpct x ms | H1 x ms | news x ms | regime/score x ms | total x ms (budget 200 ms).
 ```
 
-- The engine time covers the H1 cache and all bars. It excludes the economic calendar load, which is reported separately. The budget is 200 ms per 5000 bars.
-- When the indicator is removed, it prints the number of incremental updates and the slowest one. The budget is 5 ms per new bar. The hourly calendar refresh is not included in that number.
+- **H1** includes the single H1 `CopyRates` call and the H1 metrics. **news** includes the calendar load.
+- The terminal message "indicator is too slow" must not appear.
+- When the indicator is removed, it prints the number of incremental updates and the slowest one. The budget is 5 ms per new bar.
+- If H1 history is missing, the log shows `SENTRY: H1 history of XAUUSD requested (error 4401) ...` once. The calculation then completes on its own, within a few seconds, without any tick.
 
-| Date | Terminal build | Symbol / TF | Bars | Full history (ms) | Per 5000 bars (ms) | Slowest incremental (ms) |
-|---|---|---|---|---|---|---|
-| _to be filled from a real MT5 run_ | | | | | | |
+| Date | Terminal build | Symbol / TF | Bars | metrics | ATRpct | H1 | news | regime/score | total (ms) | slowest incremental (ms) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| _to be filled from a real MT5 run_ | | | | | | | | | | |
+
+A C++ port of the five phases, run on synthetic data outside MT5, took about 2.3 ms for 5000 + 499 bars. It excludes the CopyRates call and the calendar load. This only shows the algorithmic cost; it does not replace the MT5 line above.
 
 ## Stage 3 — Non-repaint harness
 

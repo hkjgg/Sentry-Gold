@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //| News.mqh — USD high-impact events from the MQL5 economic calendar|
-//| Cached as a sorted list of event times (server time), refreshed  |
-//| at most once per hour. Disabled silently (logged once) in the    |
+//| Loaded once for the calculated range into a sorted array of      |
+//| event times (server time), refreshed at most once per hour. Disabled silently (logged once) in the    |
 //| Strategy Tester. When the calendar is unavailable at startup the |
 //| main file prints one warning (see SENTRY.mq5).                   |
 //+------------------------------------------------------------------+
@@ -196,15 +196,22 @@ void News_Refresh(const datetime from)
 
 //+------------------------------------------------------------------+
 //| True if an event falls in [openTime - minutes, closeTime + minutes]. |
+//| `cursor` is a moving pointer owned by the caller (one per window |
+//| size): amortised O(1) when bars are visited in time order; it    |
+//| repositions itself by binary search if time goes backwards or    |
+//| the cache was reloaded.                                          |
 //+------------------------------------------------------------------+
-bool News_EventWithin(const datetime openTime, const datetime closeTime, const int minutes)
+bool News_EventWithin(const datetime openTime, const datetime closeTime, const int minutes, int &cursor)
   {
    if(!News_IsAvailable() || g_newsCount == 0)
       return false;
    const long windowStart = (long)openTime - (long)minutes * 60;
    const long windowEnd   = (long)closeTime + (long)minutes * 60;
-   const int idx = News_LowerBoundLong(g_newsTimes, g_newsCount, windowStart);
-   return (idx < g_newsCount && g_newsTimes[idx] <= windowEnd);
+   if(cursor < 0 || cursor > g_newsCount || (cursor > 0 && g_newsTimes[cursor - 1] >= windowStart))
+      cursor = News_LowerBoundLong(g_newsTimes, g_newsCount, windowStart);
+   while(cursor < g_newsCount && g_newsTimes[cursor] < windowStart)
+      cursor++;
+   return (cursor < g_newsCount && g_newsTimes[cursor] <= windowEnd);
   }
 
 #endif // SENTRY_NEWS_MQH

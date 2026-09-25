@@ -68,8 +68,9 @@ const long   SENTRY_SECONDS_PER_DAY         = 86400;
 const int    SENTRY_AUTO_WINTER_OFFSET_HOURS = 2;         // AUTO server offset outside US DST
 const int    SENTRY_AUTO_SUMMER_OFFSET_HOURS = 3;         // AUTO server offset during US DST
 const long   SENTRY_LIVE_OFFSET_TOLERANCE_SECONDS = 900;  // live offset check tolerance (clock drift)
-const int    SENTRY_CALENDAR_RETRY_SECONDS  = 2;          // startup calendar probe interval
+const int    SENTRY_TIMER_SECONDS           = 2;          // retry timer: calendar probe / H1 history refresh
 const ulong  SENTRY_CALENDAR_WAIT_MS        = 30000;      // startup wait before computing without news
+const ulong  SENTRY_H1_RETRY_MS             = 60000;      // timer refreshes while H1 history loads (then ticks only)
 const long   SENTRY_H1_WARMUP_SECONDS       = 21 * 86400; // H1 history loaded before the first chart bar
 const long   SENTRY_H1_COPY_MARGIN_SECONDS  = 86400;      // upper bound of the H1 copy range past TimeCurrent()
 const ulong  SENTRY_NEWS_REFRESH_MS         = 3600000;    // calendar cache refreshed at most hourly
@@ -79,6 +80,9 @@ const string SENTRY_NAME                    = "SENTRY";
 //+------------------------------------------------------------------+
 //| Inputs                                                           |
 //+------------------------------------------------------------------+
+input group "Calculation"
+input int    InpMaxBars             = 5000;   // Max closed bars computed (older bars stay empty)
+
 input group "Metrics"
 input int    InpERPeriod            = 20;     // Efficiency Ratio period
 input int    InpChopPeriod          = 14;     // Choppiness Index period
@@ -142,7 +146,9 @@ bool Config_IsHour(const int hour)
 bool Config_Validate()
   {
    string problem = "";
-   if(InpERPeriod < 1 || InpChopPeriod < 2 || InpATRPeriod < 1 || InpEMAPeriod < 1 || InpSlopeLag < 1)
+   if(InpMaxBars < 1)
+      problem = "MaxBars must be >= 1";
+   else if(InpERPeriod < 1 || InpChopPeriod < 2 || InpATRPeriod < 1 || InpEMAPeriod < 1 || InpSlopeLag < 1)
       problem = "metric periods must be >= 1 (Choppiness period >= 2)";
    else if(InpATRPctLookback < 2)
       problem = "ATR percentile lookback must be >= 2";

@@ -165,9 +165,8 @@ bool Sessions_InWindow(const int minute, const int startHour, const int endHour)
 //+------------------------------------------------------------------+
 //| London: AUTO 08:00-17:00 Europe/London, MANUAL GMT hours.        |
 //+------------------------------------------------------------------+
-bool Sessions_InLondon(const datetime serverTime)
+bool Sessions_InLondonUTC(const datetime utc)
   {
-   const datetime utc = Sessions_ServerToUTC(serverTime);
    if(InpSessionTimeMode == SENTRY_SESSION_TIME_MANUAL)
       return Sessions_InWindow(Sessions_MinuteOfDay(utc), InpLondonStartGMT, InpLondonEndGMT);
    const long localOffset = Sessions_IsUKDST(utc) ? SENTRY_SECONDS_PER_HOUR : 0;
@@ -178,9 +177,8 @@ bool Sessions_InLondon(const datetime serverTime)
 //+------------------------------------------------------------------+
 //| New York: AUTO 08:00-17:00 America/New_York, MANUAL GMT hours.   |
 //+------------------------------------------------------------------+
-bool Sessions_InNewYork(const datetime serverTime)
+bool Sessions_InNewYorkUTC(const datetime utc)
   {
-   const datetime utc = Sessions_ServerToUTC(serverTime);
    if(InpSessionTimeMode == SENTRY_SESSION_TIME_MANUAL)
       return Sessions_InWindow(Sessions_MinuteOfDay(utc), InpNewYorkStartGMT, InpNewYorkEndGMT);
    const long localOffset = (Sessions_IsUSDST(utc) ? -4 : -5) * SENTRY_SECONDS_PER_HOUR;
@@ -193,7 +191,8 @@ bool Sessions_InNewYork(const datetime serverTime)
 //+------------------------------------------------------------------+
 bool Sessions_IsActive(const datetime barOpenTime)
   {
-   return (Sessions_InLondon(barOpenTime) || Sessions_InNewYork(barOpenTime));
+   const datetime utc = Sessions_ServerToUTC(barOpenTime);
+   return (Sessions_InLondonUTC(utc) || Sessions_InNewYorkUTC(utc));
   }
 
 //+------------------------------------------------------------------+

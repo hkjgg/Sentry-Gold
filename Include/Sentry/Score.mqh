@@ -19,14 +19,20 @@ struct SentryFactors
   };
 
 //+------------------------------------------------------------------+
-//| Regime clarity: published regime is TREND or RANGE and the raw   |
-//| regime of the bar agrees with it.                                |
+//| Regime clarity: published regime is TREND or RANGE, the raw      |
+//| regime of the bar agrees with it, and a RANGE is quiet           |
+//| (ER <= InpRangeClarityERMax); a RANGE with higher ER is a        |
+//| transition and is not clear.                                     |
 //+------------------------------------------------------------------+
-bool Score_RegimeClear(const ENUM_SENTRY_REGIME published, const ENUM_SENTRY_REGIME raw)
+bool Score_RegimeClear(const ENUM_SENTRY_REGIME published, const ENUM_SENTRY_REGIME raw, const double er)
   {
    if(published == SENTRY_REGIME_CHOP || published == SENTRY_REGIME_SPIKE)
       return false;
-   return (raw == published);
+   if(raw != published)
+      return false;
+   if(published == SENTRY_REGIME_RANGE)
+      return (er <= InpRangeClarityERMax);
+   return true;
   }
 
 //+------------------------------------------------------------------+
@@ -137,11 +143,13 @@ ENUM_SENTRY_STATE Score_State(const int score)
   }
 
 //+------------------------------------------------------------------+
-//| Strategy hint: TREND -> continuation, RANGE -> mean reversion,   |
-//| otherwise none.                                                  |
+//| Strategy hint: none when STAND_ASIDE; otherwise TREND ->         |
+//| continuation, RANGE -> mean reversion, else none.                |
 //+------------------------------------------------------------------+
-ENUM_SENTRY_HINT Score_StrategyHint(const ENUM_SENTRY_REGIME published)
+ENUM_SENTRY_HINT Score_StrategyHint(const ENUM_SENTRY_REGIME published, const ENUM_SENTRY_STATE state)
   {
+   if(state == SENTRY_STATE_STAND_ASIDE)
+      return SENTRY_HINT_NONE;
    if(published == SENTRY_REGIME_TREND_UP || published == SENTRY_REGIME_TREND_DOWN)
       return SENTRY_HINT_CONTINUATION;
    if(published == SENTRY_REGIME_RANGE)

@@ -75,21 +75,31 @@ if(CopyBuffer(h, 2, 1, 1, state) == 1 && state[0] != EMPTY_VALUE)
 - **Anti-flicker** (`Regime_Publish`): the published regime changes only after the new raw regime holds for 2 consecutive closed bars. SPIKE is published immediately, and the first valid bar after warm-up publishes its raw regime.
 
 ### Sessions — `Include/Sentry/Sessions.mqh`
-- **Session** (`Sessions_IsActive`): a bar is in session when its open time, converted to GMT with the fixed server offset, falls in London [07:00, 16:00) or New York [12:00, 21:00) GMT.
+- **Session** (`Sessions_IsActive`): a bar is in session when its open time falls in the London or the New York window.
+- **Server offset, AUTO** (`Sessions_ServerOffsetSeconds`): the server is GMT+3 when the bar's server time falls in US DST, and GMT+2 otherwise. This is evaluated separately for every bar.
+- **US DST** (`Sessions_IsUSDST`): from the second Sunday of March at 07:00 UTC to the first Sunday of November at 06:00 UTC.
+- **UK DST** (`Sessions_IsUKDST`): from the last Sunday of March at 01:00 UTC to the last Sunday of October at 01:00 UTC.
+- **London, AUTO** (`Sessions_InLondon`): the bar's open time, converted to Europe/London local time with UK DST, is within [08:00, 17:00).
+- **New York, AUTO** (`Sessions_InNewYork`): the bar's open time, converted to America/New_York local time with US DST, is within [08:00, 17:00).
+- **MANUAL mode**: the server offset is the fixed `InpServerGMTOffset`, and the windows are London [07:00, 16:00) and New York [12:00, 21:00) GMT (the pre-DST behaviour).
+- **Live offset check** (`Sessions_CheckLiveOffset`): in AUTO mode on live bars, SENTRY compares the AUTO offset with `TimeTradeServer() − TimeGMT()`. If they differ by more than 15 minutes, it logs a warning once.
 
 ### News — `Include/Sentry/News.mqh`
 - **Events** (`News_Load`): USD events of high importance with an exact release time (`CALENDAR_TIMEMODE_DATETIME`), from `CalendarValueHistory`, cached and refreshed at most once per hour.
 - **Event near a bar** (`News_EventWithin`): an event falls within [bar open − N minutes, bar close + N minutes].
-- In the Strategy Tester, or when the calendar is unavailable, the news veto and the news factor are disabled and this is logged once.
+- **Strategy Tester**: the news veto and the news factor are disabled, and this is logged once.
+- **Startup wait** (`OnInit` / `OnTimer` in `SENTRY.mq5`, `News_Probe`): if the calendar is not ready when SENTRY starts, the full-history calculation waits. SENTRY checks the calendar every 2 seconds for up to 30 seconds, then calculates once.
+- **No calendar after the wait**: SENTRY computes the history without news and prints one warning that news vetoes are missing from past bars.
+- **Live bars** are always computed once and never rescored. They start using news as soon as an hourly retry loads the calendar.
 
 ### Score — `Include/Sentry/Score.mqh`
 Every factor is binary: it is either met or not met.
 
 | Factor | Weight | Met when (function) |
 |---|---|---|
-| Regime clarity | 35 | the published regime is TREND_UP, TREND_DOWN or RANGE and this bar's raw regime is the same (`Score_RegimeClear`) |
+| Regime clarity | 35 | the published regime is TREND_UP or TREND_DOWN, or it is RANGE with ER ≤ 0.25 (a clean, quiet range), and this bar's raw regime is the same. A RANGE with ER > 0.25 is a transition and scores 0 (`Score_RegimeClear`) |
 | Volatility healthy | 20 | 30 ≤ ATRpct ≤ 85 (`Score_VolatilityHealthy`) |
-| Session | 15 | the bar is in London or New York (`Sessions_IsActive`) |
+| Session | 15 | the bar is in the London or New York session (`Sessions_IsActive`) |
 | H1 alignment | 15 | TREND_UP with H1 trending up, TREND_DOWN with H1 trending down, or RANGE with H1 not trending, where "H1 trending" means H1 ER > 0.35 and \|H1 Slope\| > 0.15 (`Score_H1Aligned`) |
 | Spread | 10 | the bar's spread × Point ≤ 0.50 in price units (`Score_SpreadOk`) |
 | Distance from news | 5 | no USD high-impact event within ±60 min of the bar (`News_EventWithin`) |
@@ -98,7 +108,7 @@ Every factor is binary: it is either met or not met.
 - **Vetoes** (`Score_VetoMask`): news within ±15 min of the bar, spread above max, published SPIKE, or published CHOP.
 - **Veto cap** (`Score_ApplyVetoCap`): when any veto is active, the score is capped at 25.
 - **State** (`Score_State`): GO if score ≥ 70, CAUTION if score ≥ 40, otherwise STAND_ASIDE.
-- **Strategy hint** (`Score_StrategyHint`): TREND_UP / TREND_DOWN → continuation, RANGE → mean reversion, otherwise none.
+- **Strategy hint** (`Score_StrategyHint`): none when State is STAND_ASIDE. Otherwise TREND_UP / TREND_DOWN → continuation, RANGE → mean reversion, and anything else → none. The Regime buffer still shows the regime.
 
 ---
 
@@ -125,15 +135,19 @@ Every factor is binary: it is either met or not met.
 | | `InpWeightH1` | 15 | weight: H1 alignment |
 | | `InpWeightSpread` | 10 | weight: spread ≤ max |
 | | `InpWeightNews` | 5 | weight: distance from news |
+| | `InpRangeClarityERMax` | 0.25 | RANGE earns regime clarity only when ER ≤ this |
 | | `InpVolHealthyMin` | 30.0 | healthy ATRpct lower bound (inclusive) |
 | | `InpVolHealthyMax` | 85.0 | healthy ATRpct upper bound (inclusive) |
 | | `InpVetoScoreCap` | 25 | score cap when any veto is active |
 | | `InpGoScore` | 70 | GO when score ≥ this |
 | | `InpCautionScore` | 40 | CAUTION when score ≥ this |
 | Spread | `InpMaxSpreadPrice` | 0.50 | max spread in price units (USD per oz on XAUUSD) |
-| Sessions | `InpServerGMTOffset` | 2 | broker server GMT offset in hours (fixed, no DST handling) |
-| | `InpLondonStartGMT` / `InpLondonEndGMT` | 7 / 16 | London window, GMT hours, end exclusive |
-| | `InpNewYorkStartGMT` / `InpNewYorkEndGMT` | 12 / 21 | New York window, GMT hours, end exclusive |
+| Sessions | `InpSessionTimeMode` | AUTO | AUTO: server GMT+2 / GMT+3 with US DST, and local exchange hours. MANUAL: fixed offset and GMT hours |
+| | `InpLondonStartLocal` / `InpLondonEndLocal` | 8 / 17 | AUTO: London window, Europe/London local hours, end exclusive |
+| | `InpNewYorkStartLocal` / `InpNewYorkEndLocal` | 8 / 17 | AUTO: New York window, America/New_York local hours, end exclusive |
+| | `InpServerGMTOffset` | 2 | MANUAL: broker server GMT offset in hours (fixed) |
+| | `InpLondonStartGMT` / `InpLondonEndGMT` | 7 / 16 | MANUAL: London window, GMT hours, end exclusive |
+| | `InpNewYorkStartGMT` / `InpNewYorkEndGMT` | 12 / 21 | MANUAL: New York window, GMT hours, end exclusive |
 | News | `InpUseNews` | true | use the economic calendar |
 | | `InpNewsVetoMinutes` | 15 | veto window around an event (± minutes) |
 | | `InpNewsDistanceMinutes` | 60 | "distance from news" factor window (± minutes) |
@@ -141,12 +155,19 @@ Every factor is binary: it is either met or not met.
 
 Invalid inputs (for example periods < 1, inverted ranges, or hours outside 0-23) make `OnInit` return `INIT_PARAMETERS_INCORRECT` and print the reason.
 
-Engine constants that are not trading thresholds are in `Config.mqh`: EMA settle bars (100), H1 warm-up (21 days of H1 before the first chart bar), and calendar refresh interval (1 hour).
+Engine constants that are not trading thresholds are in `Config.mqh`:
+- EMA settle bars: 100.
+- H1 warm-up: 21 days of H1 before the first chart bar.
+- Calendar refresh interval: 1 hour.
+- Startup calendar probe: every 2 s, for up to 30 s.
+- AUTO offsets: +2 in winter, +3 during US DST.
+- Live offset check tolerance: 15 min.
 
 ---
 
 ## Known limitations (Stage 1)
 
-- **Server GMT offset is fixed.** Brokers that switch between GMT+2 and GMT+3 with US DST will have session windows off by one hour for part of the year.
-- **Missing news is permanent for those bars.** If the calendar is unavailable when a bar is computed, that bar is scored without news and is not rescored later. A fresh instance may then give a different result for that bar.
+- **AUTO assumes a New York-close broker** (GMT+2 in winter, GMT+3 during US DST). Brokers on another convention should use MANUAL. The live offset check logs once when the assumption looks wrong.
+- **MANUAL uses a fixed offset.** With a broker that changes offset for DST, session windows are one hour off for part of the year.
+- **Missing news is permanent for those bars.** If the calendar is still unavailable after the 30 s startup wait, those history bars are scored without news and a warning is printed. They are not rescored later, so a fresh instance may give a different result for those bars.
 - **Recursive EMA depends on the history start.** The EMA settles over 100+ bars, so values are identical for identical history but can differ by rounding noise when the history start differs.

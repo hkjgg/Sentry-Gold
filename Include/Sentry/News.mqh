@@ -2,7 +2,8 @@
 //| News.mqh — USD high-impact events from the MQL5 economic calendar|
 //| Cached as a sorted list of event times (server time), refreshed  |
 //| at most once per hour. Disabled silently (logged once) in the    |
-//| Strategy Tester or when the calendar is unavailable.             |
+//| Strategy Tester. When the calendar is unavailable at startup the |
+//| main file prints one warning (see SENTRY.mq5).                   |
 //+------------------------------------------------------------------+
 #ifndef SENTRY_NEWS_MQH
 #define SENTRY_NEWS_MQH
@@ -16,6 +17,7 @@ ulong    g_newsLastAttempt = 0;       // GetTickCount64() of the last load attem
 datetime g_newsFrom        = 0;       // start of the cached range
 long     g_newsTimes[];               // sorted event times
 int      g_newsCount       = 0;
+int      g_newsLastError   = 0;       // last calendar error code (0 = none)
 
 void News_LogOnce(const string message)
   {
@@ -37,6 +39,7 @@ void News_Init()
    g_newsLastAttempt = 0;
    g_newsFrom        = 0;
    g_newsCount       = 0;
+   g_newsLastError   = 0;
    ArrayFree(g_newsTimes);
    if(InpUseNews && MQLInfoInteger(MQL_TESTER) != 0)
       News_LogOnce(SENTRY_NAME + ": economic calendar is not available in the Strategy Tester; news veto and news factor disabled.");
@@ -90,8 +93,7 @@ bool News_Load(const datetime from)
    const int eventCount = CalendarEventByCurrency(SENTRY_NEWS_CURRENCY, events);
    if(eventCount <= 0)
      {
-      News_LogOnce(StringFormat("%s: economic calendar unavailable (error %d); news veto and news factor disabled.",
-                                SENTRY_NAME, GetLastError()));
+      g_newsLastError = GetLastError();
       return false;
      }
 
@@ -114,8 +116,7 @@ bool News_Load(const datetime from)
    ResetLastError();
    if(!CalendarValueHistory(values, from, (datetime)0, NULL, SENTRY_NEWS_CURRENCY))
      {
-      News_LogOnce(StringFormat("%s: economic calendar history unavailable (error %d); news veto and news factor disabled.",
-                                SENTRY_NAME, GetLastError()));
+      g_newsLastError = GetLastError();
       return false;
      }
 
@@ -138,7 +139,35 @@ bool News_Load(const datetime from)
    ArrayFree(g_newsTimes);
    if(timeCount > 0)
       ArrayCopy(g_newsTimes, times);
-   g_newsCount = timeCount;
+   g_newsCount     = timeCount;
+   g_newsLastError = 0;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Startup readiness probe: USD events are known and the last week  |
+//| of USD values can be read.                                       |
+//+------------------------------------------------------------------+
+bool News_Probe()
+  {
+   if(!News_IsEnabled())
+      return false;
+   MqlCalendarEvent events[];
+   ResetLastError();
+   if(CalendarEventByCurrency(SENTRY_NEWS_CURRENCY, events) <= 0)
+     {
+      g_newsLastError = GetLastError();
+      return false;
+     }
+   MqlCalendarValue values[];
+   const datetime from = (datetime)((long)TimeTradeServer() - 7 * SENTRY_SECONDS_PER_DAY);
+   ResetLastError();
+   if(!CalendarValueHistory(values, from, (datetime)0, NULL, SENTRY_NEWS_CURRENCY) || ArraySize(values) == 0)
+     {
+      g_newsLastError = GetLastError();
+      return false;
+     }
+   g_newsLastError = 0;
    return true;
   }
 
